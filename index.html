@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>StockMind AI - Research & Watchlist Scanner</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    * { box-sizing: border-box; font-family: Arial, sans-serif; }
+    body { margin: 0; background: #0f172a; color: #f8fafc; padding: 24px; }
+    .container { max-width: 960px; margin: 0 auto; }
+    h1 { margin: 0 0 6px; font-size: 28px; color: #38bdf8; }
+    .subtitle { color: #94a3b8; margin-bottom: 20px; font-size: 14px; }
+    .search-box { display: flex; gap: 10px; margin-bottom: 18px; }
+    input {
+      flex: 1; padding: 11px 14px; border-radius: 8px; border: 1px solid #334155;
+      background: #1e293b; color: #fff; font-size: 15px;
+    }
+    button {
+      padding: 11px 20px; border-radius: 8px; border: none; background: #0284c7;
+      color: #fff; font-size: 15px; font-weight: bold; cursor: pointer;
+    }
+    button:hover { background: #0369a1; }
+    .btn-green { background: #059669; }
+    .btn-green:hover { background: #047857; }
+    .card {
+      background: #1e293b; border: 1px solid #334155; border-radius: 12px;
+      padding: 20px; margin-bottom: 20px;
+    }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; }
+    .metric { background: #0f172a; padding: 14px; border-radius: 8px; border: 1px solid #1e293b; }
+    .metric-label { font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
+    .metric-value { font-size: 20px; font-weight: bold; }
+    .pos { color: #4ade80; }
+    .neg { color: #f87171; }
+    ul { margin: 8px 0 0; padding-left: 20px; line-height: 1.7; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 14px; }
+    th, td { padding: 11px 10px; text-align: left; border-bottom: 1px solid #334155; }
+    th { color: #94a3b8; font-weight: bold; background: #0f172a; }
+    tr.clickable:hover { background: #263348; cursor: pointer; }
+    .badge {
+      padding: 4px 8px; border-radius: 6px; font-size: 12px; font-weight: bold;
+      background: #0f172a; border: 1px solid #334155;
+    }
+    .chart-box { position: relative; height: 290px; margin-top: 18px; background: #0f172a; padding: 12px; border-radius: 10px; }
+    .disclaimer { font-size: 12px; color: #94a3b8; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>StockMind AI</h1>
+    <div class="subtitle">Phase 1 Personal Research &amp; Watchlist Scanner (Educational &amp; Analytical Use Only)</div>
+
+    <div class="search-box">
+      <input id="tickerInput" type="text" value="RELIANCE.NS" placeholder="Enter Single Ticker (e.g., RELIANCE.NS)" />
+      <button id="analyzeBtn" type="button">Analyze Stock</button>
+    </div>
+
+    <div id="resultArea" class="card">Ready to analyze...</div>
+
+    <div class="card">
+      <h2 style="margin-top:0; font-size:20px; color:#38bdf8;">Watchlist Multi-Stock Scanner</h2>
+      <div style="font-size:13px; color:#94a3b8; margin-bottom:10px;">
+        Enter comma-separated tickers (max 15). Click any row to load full analysis above.
+      </div>
+      <div class="search-box" style="margin-bottom:10px;">
+        <input id="watchlistInput" type="text" value="RELIANCE.NS, TCS.NS, HDFCBANK.NS, INFY.NS, ICICIBANK.NS, SBIN.NS" />
+        <button id="scanBtn" class="btn-green" type="button">Scan Watchlist</button>
+      </div>
+      <div id="scanArea" style="color:#94a3b8; font-size:14px;">Click "Scan Watchlist" to compare multiple stocks.</div>
+    </div>
+
+    <div class="disclaimer">
+      Disclaimer: This tool is for personal research and educational analysis only. Not SEBI-registered investment advice.
+    </div>
+  </div>
+
+  <script>
+    let priceChartInstance = null;
+
+    function renderPriceChart(ticker, chartData) {
+      if (!chartData || !chartData.dates) return;
+      const canvas = document.getElementById("priceChart");
+      if (!canvas) return;
+      if (priceChartInstance) {
+        priceChartInstance.destroy();
+      }
+      priceChartInstance = new Chart(canvas.getContext("2d"), {
+        type: "line",
+        data: {
+          labels: chartData.dates,
+          datasets: [
+            { label: ticker + " Close", data: chartData.close, borderColor: "#38bdf8", borderWidth: 2, pointRadius: 0, tension: 0.15 },
+            { label: "SMA 20", data: chartData.sma_20, borderColor: "#4ade80", borderWidth: 1.5, borderDash: [4, 3], pointRadius: 0, tension: 0.15 },
+            { label: "SMA 50", data: chartData.sma_50, borderColor: "#f59e0b", borderWidth: 1.5, pointRadius: 0, tension: 0.15 }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: "index", intersect: false },
+          plugins: { legend: { labels: { color: "#cbd5e1" } } },
+          scales: {
+            x: { ticks: { color: "#94a3b8", maxTicksLimit: 8 }, grid: { color: "#1e293b" } },
+            y: { ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } }
+          }
+        }
+      });
+    }
+
+    async function fetchStock(customTicker) {
+      const inputEl = document.getElementById("tickerInput");
+      if (customTicker) inputEl.value = customTicker;
+      const area = document.getElementById("resultArea");
+      const ticker = (inputEl.value || "RELIANCE.NS").trim().toUpperCase();
+      area.innerHTML = "Analyzing <b>" + ticker + "</b>...";
+
+      try {
+        const res = await fetch("http://127.0.0.1:8000/analyze/" + encodeURIComponent(ticker));
+        const data = await res.json();
+
+        if (data.error) {
+          area.innerHTML = '<span class="neg">' + data.error + "</span>";
+          return;
+        }
+
+        const chgClass = data.change_percent >= 0 ? "pos" : "neg";
+        const signalsHtml = (data.signals || []).map(s => "<li>" + s + "</li>").join("");
+
+        let mlHtml = "";
+        if (data.ml_prediction) {
+          const ml = data.ml_prediction;
+          mlHtml = `
+            <div class="card" style="margin-top:16px; margin-bottom:0; background:#172554; border-color:#1d4ed8;">
+              <h3 style="margin:0 0 10px; color:#93c5fd;">AI / ML Prediction (${ml.horizon_days}-Day Outlook)</h3>
+              <div class="grid">
+                <div class="metric"><div class="metric-label">Upward Probability</div><div class="metric-value" style="color:#38bdf8;">${ml.up_probability_pct}%</div></div>
+                <div class="metric"><div class="metric-label">Model Bias</div><div class="metric-value" style="font-size:16px;">${ml.ml_bias}</div></div>
+                <div class="metric"><div class="metric-label">Holdout Test Accuracy</div><div class="metric-value">${ml.holdout_accuracy_pct}%</div></div>
+              </div>
+            </div>`;
+        }
+
+        let newsHtml = "";
+        if (data.news_sentiment) {
+          const ns = data.news_sentiment;
+          const items = (ns.headlines || []).map(h => {
+            const toneColor = h.tone === "Positive" ? "#4ade80" : (h.tone === "Negative" ? "#f87171" : "#cbd5e1");
+            const titlePart = h.url
+              ? `<a href="${h.url}" target="_blank" rel="noopener noreferrer" style="color:#e2e8f0; text-decoration:none;">${h.title}</a>`
+              : `<span>${h.title}</span>`;
+            return `<li style="margin-bottom:6px;"><span class="badge" style="color:${toneColor}; margin-right:6px;">${h.tone}</span>${titlePart}</li>`;
+          }).join("");
+
+          newsHtml = `
+            <div class="card" style="margin-top:16px; margin-bottom:0; background:#0f172a; border-color:#334155;">
+              <h3 style="margin:0 0 8px; color:#38bdf8;">Recent News Sentiment — ${ns.overall_sentiment} (${ns.sentiment_score}/100)</h3>
+              ${items ? `<ul style="margin-top:8px;">${items}</ul>` : `<div style="color:#94a3b8; font-size:13px;">No recent headlines returned for this ticker.</div>`}
+            </div>`;
+        }
+
+        area.innerHTML = `
+          <h2 style="margin-top:0;">${data.ticker} — Research Score: <span style="color:#38bdf8;">${data.research_score}/100</span></h2>
+          <div class="grid">
+            <div class="metric"><div class="metric-label">Current Price</div><div class="metric-value">₹${data.current_price}</div></div>
+            <div class="metric"><div class="metric-label">Day Change</div><div class="metric-value ${chgClass}">${data.change_percent}%</div></div>
+            <div class="metric"><div class="metric-label">RSI (14)</div><div class="metric-value">${data.indicators.RSI_14}</div></div>
+            <div class="metric"><div class="metric-label">SMA 20 / SMA 50</div><div class="metric-value" style="font-size:15px;">${data.indicators.SMA_20} / ${data.indicators.SMA_50}</div></div>
+          </div>
+          <div class="chart-box"><canvas id="priceChart"></canvas></div>
+          ${mlHtml}
+          ${newsHtml}
+          <h3 style="margin-top:20px; margin-bottom:6px;">Technical Signals</h3>
+          <ul>${signalsHtml}</ul>`;
+
+        renderPriceChart(data.ticker, data.chart_data);
+      } catch (err) {
+        area.innerHTML = `<span class="neg">Error: ${err.message}</span>`;
+      }
+    }
+
+    async function scanWatchlist() {
+      const listVal = document.getElementById("watchlistInput").value.trim();
+      const scanArea = document.getElementById("scanArea");
+      if (!listVal) {
+        scanArea.innerHTML = '<span class="neg">Please enter at least one ticker.</span>';
+        return;
+      }
+      scanArea.innerHTML = "Scanning watchlist & running ML models (takes ~5-10 seconds)...";
+
+      try {
+        const res = await fetch("http://127.0.0.1:8000/scan?tickers=" + encodeURIComponent(listVal));
+        const data = await res.json();
+        const rows = (data.results || []).map(item => {
+          if (item.error) {
+            return `<tr><td><b>${item.ticker}</b></td><td colspan="6" class="neg">${item.error}</td></tr>`;
+          }
+          const chgClass = item.change_percent >= 0 ? "pos" : "neg";
+          const mlProb = item.ml_prediction ? item.ml_prediction.up_probability_pct + "%" : "-";
+          const mlBias = item.ml_prediction ? item.ml_prediction.ml_bias : "-";
+          return `
+            <tr class="clickable" onclick="fetchStock('${item.ticker}')">
+              <td><b>${item.ticker}</b></td>
+              <td>₹${item.current_price}</td>
+              <td class="${chgClass}">${item.change_percent}%</td>
+              <td>${item.indicators.RSI_14}</td>
+              <td><span class="badge" style="color:#38bdf8;">${item.research_score}/100</span></td>
+              <td><b>${mlProb}</b></td>
+              <td>${mlBias}</td>
+            </tr>`;
+        }).join("");
+
+        scanArea.innerHTML = `
+          <table>
+            <thead>
+              <tr><th>Ticker</th><th>Price</th><th>Change</th><th>RSI (14)</th><th>Research Score</th><th>5D Up Prob</th><th>ML Bias</th></tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>`;
+      } catch (err) {
+        scanArea.innerHTML = `<span class="neg">Scan failed: ${err.message}</span>`;
+      }
+    }
+
+    document.getElementById("analyzeBtn").addEventListener("click", () => fetchStock());
+    document.getElementById("scanBtn").addEventListener("click", scanWatchlist);
+    window.addEventListener("DOMContentLoaded", () => {
+      fetchStock();
+      scanWatchlist();
+    });
+  </script>
+</body>
+</html>
