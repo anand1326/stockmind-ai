@@ -1,8 +1,15 @@
+import hashlib
 import os
+import secrets
+import sqlite3
 import time
-from fastapi import FastAPI
+from datetime import datetime, timezone
+from typing import Optional
+
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, EmailStr
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -20,10 +27,117 @@ app.add_middleware(
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INDEX_PATH = os.path.join(BASE_DIR, "index.html")
+DB_PATH = os.path.join(BASE_DIR, "stockmind_users.db")
 
 # Simple in-memory cache (10 minutes TTL per ticker)
 CACHE_TTL_SECONDS = 600
 _ANALYSIS_CACHE = {}
+
+
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE NOT NULL,
+            full_name TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            plan TEXT NOT NULL DEFAULT 'free',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sessions (
+            token TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+init_db()
+
+
+def hash_password(password: str, salt: Optional[str] = None) -> str:
+    if salt is None:
+        salt = secrets.token_hex(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 100_000)
+    return f"{salt}${dk.hex()}"
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    try:
+        salt, expected_hex = stored_hash.split("$", 1)
+    except ValueError:
+        return False
+    candidate = hash_password(password, salt)
+    _, actual_hex = candidate.split("$", 1)
+    return secrets.compare_digest(actual_hex, expected_hex)
+
+
+def create_session_token(user_id: int) -> str:
+    token = secrets.token_urlsafe(32)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)",
+        (token, user_id, now_iso),
+    )
+    conn.commit()
+    conn.close()
+    return token
+
+
+def get_current_user(authorization: Optional[str] = Header(default=None)):
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization token")
+    token = authorization.split(" ", 1)[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Empty token")
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT u.id, u.email, u.full_name, u.plan, u.created_at
+        FROM sessions s
+        JOIN users u ON s.user_id = u.id
+        WHERE s.token = ?
+        """,
+        (token,),
+    )
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token")
+    return dict(row)
+
+
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    password: str
+    full_name: Optional[str] = "Researcher"
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
 
 
 def build_features(df: pd.DataFrame):
@@ -256,6 +370,79 @@ def evaluate_single_ticker(ticker: str):
         "data": result
     }
     return result
+
+
+@app.post("/auth/register")
+def register_user(payload: RegisterRequest):
+    email_norm = payload.email.strip().lower()
+    if len(payload.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+
+    full_name = (payload.full_name or "Researcher").strip() or "Researcher"
+    now_iso = datetime.now(timezone.utc).isoformat()
+    pw_hash = hash_password(payload.password)
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO users (email, full_name, password_hash, plan, created_at)
+            VALUES (?, ?, ?, 'free', ?)
+            """,
+            (email_norm, full_name, pw_hash, now_iso),
+        )
+        conn.commit()
+        user_id = cur.lastrowid
+    except sqlite3.IntegrityError:
+        conn.close()
+        raise HTTPException(status_code=409, detail="Email is already registered")
+    conn.close()
+
+    token = create_session_token(user_id)
+    return {
+        "message": "Account created successfully",
+        "token": token,
+        "user": {
+            "id": user_id,
+            "email": email_norm,
+            "full_name": full_name,
+            "plan": "free",
+        },
+    }
+
+
+@app.post("/auth/login")
+def login_user(payload: LoginRequest):
+    email_norm = payload.email.strip().lower()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, email, full_name, password_hash, plan FROM users WHERE email = ?",
+        (email_norm,),
+    )
+    row = cur.fetchone()
+    conn.close()
+
+    if not row or not verify_password(payload.password, row["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    token = create_session_token(row["id"])
+    return {
+        "message": "Login successful",
+        "token": token,
+        "user": {
+            "id": row["id"],
+            "email": row["email"],
+            "full_name": row["full_name"],
+            "plan": row["plan"],
+        },
+    }
+
+
+@app.get("/auth/me")
+def get_me(current_user: dict = Depends(get_current_user)):
+    return {"user": current_user}
 
 
 @app.get("/")
