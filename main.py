@@ -1,4 +1,5 @@
 import os
+import time
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -19,6 +20,10 @@ app.add_middleware(
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INDEX_PATH = os.path.join(BASE_DIR, "index.html")
+
+# Simple in-memory cache (10 minutes TTL per ticker)
+CACHE_TTL_SECONDS = 600
+_ANALYSIS_CACHE = {}
 
 
 def build_features(df: pd.DataFrame):
@@ -157,6 +162,11 @@ def evaluate_single_ticker(ticker: str):
     if not clean_ticker:
         return {"error": "Empty ticker"}
 
+    now = time.time()
+    cached = _ANALYSIS_CACHE.get(clean_ticker)
+    if cached and (now - cached["timestamp"]) < CACHE_TTL_SECONDS:
+        return cached["data"]
+
     stock = yf.Ticker(clean_ticker)
     df = stock.history(period="2y")
 
@@ -225,7 +235,7 @@ def evaluate_single_ticker(ticker: str):
         "sma_50": [round(float(x), 2) if pd.notna(x) else None for x in chart_df['SMA_50']],
     }
 
-    return {
+    result = {
         "ticker": clean_ticker,
         "current_price": current_price,
         "change_percent": change_pct,
@@ -240,6 +250,12 @@ def evaluate_single_ticker(ticker: str):
         "signals": signals,
         "chart_data": chart_data
     }
+
+    _ANALYSIS_CACHE[clean_ticker] = {
+        "timestamp": now,
+        "data": result
+    }
+    return result
 
 
 @app.get("/")
